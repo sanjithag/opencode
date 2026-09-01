@@ -3,10 +3,15 @@ import { createMemo, For } from "solid-js"
 import { ContentCode } from "./content-code"
 import styles from "./content-diff.module.css"
 
-type DiffRow = {
+export type DiffRow = {
   left: string
   right: string
   type: "added" | "removed" | "unchanged" | "modified"
+}
+
+export type MobileBlock = {
+  type: "removed" | "added" | "unchanged"
+  lines: string[]
 }
 
 interface Props {
@@ -14,183 +19,206 @@ interface Props {
   lang?: string
 }
 
+export type LinePrefix = "-" | "+" | " "
+
+// Collect a run of consecutive lines starting at `start` that share `prefix`.
+// Returns the stripped content and the index just past the run.
+export function collectConsecutive(
+  lines: string[],
+  start: number,
+  prefix: LinePrefix
+): { items: string[]; nextIndex: number } {
+  const items: string[] = []
+  let i = start
+  while (i < lines.length && lines[i][0] === prefix) {
+    items.push(lines[i].slice(1))
+    i++
+  }
+  return { items, nextIndex: i }
+}
+
+// Zip a block of removed lines with a block of added lines into DiffRows.
+// Extra removals become "removed" rows, extra additions become "added" rows.
+export function pairRemovalsAndAdditions(removals: string[], additions: string[]): DiffRow[] {
+  const rows: DiffRow[] = []
+  const maxLength = Math.max(removals.length, additions.length)
+
+  for (let k = 0; k < maxLength; k++) {
+    const hasLeft = k < removals.length
+    const hasRight = k < additions.length
+
+    if (hasLeft && hasRight) {
+      rows.push({ left: removals[k], right: additions[k], type: "modified" })
+    } else if (hasLeft) {
+      rows.push({ left: removals[k], right: "", type: "removed" })
+    } else if (hasRight) {
+      rows.push({ left: "", right: additions[k], type: "added" })
+    }
+  }
+
+  return rows
+}
+
+export function unchangedRow(content: string): DiffRow {
+  const value = content === "" ? " " : content
+  return { left: value, right: value, type: "unchanged" }
+}
+
+// Walk one hunk's lines and produce all its DiffRows.
+export function parseHunkLines(lines: string[]): DiffRow[] {
+  const rows: DiffRow[] = []
+  let i = 0
+
+  while (i < lines.length) {
+    const line = lines[i]
+    const prefix = line[0]
+
+    if (prefix === "-") {
+      const { items: removals, nextIndex: afterRemovals } = collectConsecutive(lines, i, "-")
+      const { items: additions, nextIndex: afterAdditions } = collectConsecutive(
+        lines,
+        afterRemovals,
+        "+"
+      )
+      rows.push(...pairRemovalsAndAdditions(removals, additions))
+      i = afterAdditions
+    } else if (prefix === "+") {
+      rows.push({ left: "", right: line.slice(1), type: "added" })
+      i++
+    } else if (prefix === " ") {
+      rows.push(unchangedRow(line.slice(1)))
+      i++
+    } else {
+      i++
+    }
+  }
+
+  return rows
+}
+
+// Starting at `start`, collect consecutive modified/removed/added rows into
+// separate left/right line lists. Returns the index just past the run.
+export function collectChangeBlock(
+  rows: DiffRow[],
+  start: number
+): { removedLines: string[]; addedLines: string[]; nextIndex: number } {
+  const removedLines: string[] = []
+  const addedLines: string[] = []
+  let i = start
+
+  while (i < rows.length && (rows[i].type === "modified" || rows[i].type === "removed" || rows[i].type === "added")) {
+    const row = rows[i]
+    if (row.left && (row.type === "removed" || row.type === "modified")) {
+      removedLines.push(row.left)
+    }
+    if (row.right && (row.type === "added" || row.type === "modified")) {
+      addedLines.push(row.right)
+    }
+    i++
+  }
+
+  return { removedLines, addedLines, nextIndex: i }
+}
+
+// Group flat DiffRows into mobile blocks: consecutive changes are merged into
+// a "removed" block followed by an "added" block, unchanged rows pass through
+// individually.
+export function buildMobileBlocks(rows: DiffRow[]): MobileBlock[] {
+  const blocks: MobileBlock[] = []
+  let i = 0
+
+  while (i < rows.length) {
+    const { removedLines, addedLines, nextIndex } = collectChangeBlock(rows, i)
+    i = nextIndex
+
+    if (removedLines.length > 0) {
+      blocks.push({ type: "removed", lines: removedLines })
+    }
+    if (addedLines.length > 0) {
+      blocks.push({ type: "added", lines: addedLines })
+    }
+
+    if (i < rows.length && rows[i].type === "unchanged") {
+      blocks.push({ type: "unchanged", lines: [rows[i].left] })
+      i++
+    }
+  }
+
+  return blocks
+}
+
+// --- Rendering helpers ---
+
+function beforeDiffType(type: DiffRow["type"]): "removed" | "" {
+  return type === "removed" || type === "modified" ? "removed" : ""
+}
+
+function afterDiffType(type: DiffRow["type"]): "added" | "" {
+  return type === "added" || type === "modified" ? "added" : ""
+}
+
+function mobileLineDiffType(blockType: MobileBlock["type"]): "removed" | "added" | "" {
+  if (blockType === "removed") return "removed"
+  if (blockType === "added") return "added"
+  return ""
+}
+
+function DesktopDiffRow(props: { row: DiffRow; lang?: string }) {
+  return (
+    <div data-component="diff-row" data-type={props.row.type}>
+      <div data-slot="before" data-diff-type={beforeDiffType(props.row.type)}>
+        <ContentCode code={props.row.left} flush lang={props.lang} />
+      </div>
+      <div data-slot="after" data-diff-type={afterDiffType(props.row.type)}>
+        <ContentCode code={props.row.right} lang={props.lang} flush />
+      </div>
+    </div>
+  )
+}
+
+function MobileDiffBlock(props: { block: MobileBlock; lang?: string }) {
+  return (
+    <div data-component="diff-block" data-type={props.block.type}>
+      <For each={props.block.lines}>
+        {(line) => (
+          <div data-diff-type={mobileLineDiffType(props.block.type)}>
+            <ContentCode code={line} lang={props.lang} flush />
+          </div>
+        )}
+      </For>
+    </div>
+  )
+}
+
 export function ContentDiff(props: Props) {
   const rows = createMemo(() => {
-    const diffRows: DiffRow[] = []
-
     try {
       const patches = parsePatch(props.diff)
+      const diffRows: DiffRow[] = []
 
       for (const patch of patches) {
         for (const hunk of patch.hunks) {
-          const lines = hunk.lines
-          let i = 0
-
-          while (i < lines.length) {
-            const line = lines[i]
-            const content = line.slice(1)
-            const prefix = line[0]
-
-            if (prefix === "-") {
-              // Look ahead for consecutive additions to pair with removals
-              const removals: string[] = [content]
-              let j = i + 1
-
-              // Collect all consecutive removals
-              while (j < lines.length && lines[j][0] === "-") {
-                removals.push(lines[j].slice(1))
-                j++
-              }
-
-              // Collect all consecutive additions that follow
-              const additions: string[] = []
-              while (j < lines.length && lines[j][0] === "+") {
-                additions.push(lines[j].slice(1))
-                j++
-              }
-
-              // Pair removals with additions
-              const maxLength = Math.max(removals.length, additions.length)
-              for (let k = 0; k < maxLength; k++) {
-                const hasLeft = k < removals.length
-                const hasRight = k < additions.length
-
-                if (hasLeft && hasRight) {
-                  // Replacement - left is removed, right is added
-                  diffRows.push({
-                    left: removals[k],
-                    right: additions[k],
-                    type: "modified",
-                  })
-                } else if (hasLeft) {
-                  // Pure removal
-                  diffRows.push({
-                    left: removals[k],
-                    right: "",
-                    type: "removed",
-                  })
-                } else if (hasRight) {
-                  // Pure addition - only create if we actually have content
-                  diffRows.push({
-                    left: "",
-                    right: additions[k],
-                    type: "added",
-                  })
-                }
-              }
-
-              i = j
-            } else if (prefix === "+") {
-              // Standalone addition (not paired with removal)
-              diffRows.push({
-                left: "",
-                right: content,
-                type: "added",
-              })
-              i++
-            } else if (prefix === " ") {
-              diffRows.push({
-                left: content === "" ? " " : content,
-                right: content === "" ? " " : content,
-                type: "unchanged",
-              })
-              i++
-            } else {
-              i++
-            }
-          }
+          diffRows.push(...parseHunkLines(hunk.lines))
         }
       }
+
+      return diffRows
     } catch (error) {
       console.error("Failed to parse patch:", error)
       return []
     }
-
-    return diffRows
   })
 
-  const mobileRows = createMemo(() => {
-    const mobileBlocks: {
-      type: "removed" | "added" | "unchanged"
-      lines: string[]
-    }[] = []
-    const currentRows = rows()
-
-    let i = 0
-    while (i < currentRows.length) {
-      const removedLines: string[] = []
-      const addedLines: string[] = []
-
-      // Collect consecutive modified/removed/added rows
-      while (
-        i < currentRows.length &&
-        (currentRows[i].type === "modified" || currentRows[i].type === "removed" || currentRows[i].type === "added")
-      ) {
-        const row = currentRows[i]
-        if (row.left && (row.type === "removed" || row.type === "modified")) {
-          removedLines.push(row.left)
-        }
-        if (row.right && (row.type === "added" || row.type === "modified")) {
-          addedLines.push(row.right)
-        }
-        i++
-      }
-
-      // Add grouped blocks
-      if (removedLines.length > 0) {
-        mobileBlocks.push({ type: "removed", lines: removedLines })
-      }
-      if (addedLines.length > 0) {
-        mobileBlocks.push({ type: "added", lines: addedLines })
-      }
-
-      // Add unchanged rows as-is
-      if (i < currentRows.length && currentRows[i].type === "unchanged") {
-        mobileBlocks.push({
-          type: "unchanged",
-          lines: [currentRows[i].left],
-        })
-        i++
-      }
-    }
-
-    return mobileBlocks
-  })
+  const mobileRows = createMemo(() => buildMobileBlocks(rows()))
 
   return (
     <div class={styles.root}>
       <div data-component="desktop">
-        <For each={rows()}>
-          {(row) => (
-            <div data-component="diff-row" data-type={row.type}>
-              <div
-                data-slot="before"
-                data-diff-type={row.type === "removed" || row.type === "modified" ? "removed" : ""}
-              >
-                <ContentCode code={row.left} flush lang={props.lang} />
-              </div>
-              <div data-slot="after" data-diff-type={row.type === "added" || row.type === "modified" ? "added" : ""}>
-                <ContentCode code={row.right} lang={props.lang} flush />
-              </div>
-            </div>
-          )}
-        </For>
+        <For each={rows()}>{(row) => <DesktopDiffRow row={row} lang={props.lang} />}</For>
       </div>
 
       <div data-component="mobile">
-        <For each={mobileRows()}>
-          {(block) => (
-            <div data-component="diff-block" data-type={block.type}>
-              <For each={block.lines}>
-                {(line) => (
-                  <div data-diff-type={block.type === "removed" ? "removed" : block.type === "added" ? "added" : ""}>
-                    <ContentCode code={line} lang={props.lang} flush />
-                  </div>
-                )}
-              </For>
-            </div>
-          )}
-        </For>
+        <For each={mobileRows()}>{(block) => <MobileDiffBlock block={block} lang={props.lang} />}</For>
       </div>
     </div>
   )
