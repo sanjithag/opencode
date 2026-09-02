@@ -147,7 +147,7 @@ export function buildMobileBlocks(rows: DiffRow[]): MobileBlock[] {
   return blocks
 }
 
-// --- Rendering helpers ---
+// Rendering helpers
 
 function beforeDiffType(type: DiffRow["type"]): "removed" | "" {
   return type === "removed" || type === "modified" ? "removed" : ""
